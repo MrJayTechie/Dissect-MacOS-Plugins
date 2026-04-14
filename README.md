@@ -5,7 +5,7 @@
 Point `target-query` at the extracted Velociraptor output's `uploads/auto` directory:
 
 ```bash
-target-query --plugin-path ~/Documents/dissect-plugin/plugins/ -f <function> "<path-to-velo-output>/uploads/auto" -j
+target-query --plugin-path <Plugin Path> -f <function> "<path-to-velo-output>/uploads/auto" -j
 ```
 
 **Flags:**
