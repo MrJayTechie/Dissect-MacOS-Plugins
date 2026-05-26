@@ -94,9 +94,24 @@ _NUMERIC_NOISE_STREAMS = frozenset({
     "Device.Display.Backlight",
     "Device.Wireless.WiFi",
     "Device.Wireless.Bluetooth",
+    "Device.Wireless.BluetoothNearbyDevice",
     "Notification.Usage",
     "UserFocus.InferredMode",
     "UserFocus.ComputedMode",
+    # Tahoe streams whose protobuf payloads carry sensor numerics next to
+    # the useful strings — drop the alignment-artifact floats so analysts
+    # see UUIDs + bundle ids + task identifiers cleanly.
+    "Lighthouse.Ledger.TaskCustomEvent",
+    "Lighthouse.Ledger.TaskStatus",
+    "Lighthouse.Ledger.TaskTelemetry",
+    "Lighthouse.Ledger.TaskError",
+    "Lighthouse.Ledger.TrialdEvent",
+    "Lighthouse.Ledger.LighthousePluginEvent",
+    "Lighthouse.Ledger.DeviceTelemetry",
+    "Lighthouse.Ledger.DediscoPrivacyEvent",
+    "Lighthouse.Ledger.MlruntimedEvent",
+    "GenerativeModels.GenerativeFunctions.Instrumentation",
+    "SystemSettings.SearchTerms",
 })
 
 
@@ -119,33 +134,82 @@ def _join_strings(strings, stream_name):
 def _parse_segb_records(data):
     """Parse SEGB (Segmented Binary) file and yield (timestamp, strings) tuples.
 
-    Scans the entire file for Cocoa float64 timestamps in protobuf fixed64 fields,
-    then extracts nearby protobuf string fields for context.
+    Older Biome streams encoded timestamps as float64 Cocoa seconds in a
+    protobuf fixed64 field. macOS 26 (Tahoe) streams (Lighthouse.Ledger.*,
+    Siri.Remembers.*, AppleIntelligence.Reporting.*, SystemSettings.*) often
+    use int64 Cocoa-nanosecond timestamps and place them under
+    field_num=1 (tag byte 0x09) which the legacy scan rejected.
+
+    Strategy: scan every position; at each candidate, try both decodings
+    (float64-seconds, int64-nanoseconds) and only accept values within the
+    plausible Cocoa window. Dedupe nearby hits so we don't emit a record
+    per byte of the same timestamp.
+
+    Fallback: very sparse SEGB segments (e.g. ``SystemSettings.SearchTerms``)
+    contain a single header timestamp at bytes 0x08..0x10 and no per-record
+    timestamps. When the body scan finds nothing, we emit one synthesized
+    record per segment using the header timestamp + every printable string.
     """
     if len(data) < 0x30 or data[:4] != b"SEGB":
         return
 
+    # Plausible Cocoa-epoch window: 2023..2028 in seconds and ns.
+    LO_S, HI_S = 700_000_000, 900_000_000
+    LO_NS, HI_NS = LO_S * 1_000_000_000, HI_S * 1_000_000_000
+
     pos = 0x20
     last_ts_pos = -100  # deduplicate nearby timestamps
+    body_hits = 0
 
     while pos < len(data) - 9:
         tag = data[pos]
-        if (tag & 0x07) == 1 and tag > 0x08:  # wire type 1 = fixed64
-            try:
-                val = struct.unpack("<d", data[pos + 1 : pos + 9])[0]
-            except struct.error:
-                pos += 1
-                continue
+        wire = tag & 0x07
+        # Accept any fixed64-tagged value (wire type 1). Don't require
+        # tag > 0x08 — Tahoe streams put the timestamp in field_num=1
+        # (tag byte 0x09) where the legacy scan rejected.
+        if wire != 1 or tag == 0:
+            pos += 1
+            continue
+        if pos - last_ts_pos <= 8:
+            pos += 1
+            continue
 
-            if 700000000 < val < 900000000 and pos - last_ts_pos > 8:
-                ts = _cocoa_ts(val)
-                search_start = max(0x20, pos - 50)
-                search_end = min(len(data), pos + 250)
-                strings = _extract_protobuf_strings(data, search_start, search_end)
-                last_ts_pos = pos
-                yield ts, strings
+        try:
+            d_val = struct.unpack("<d", data[pos + 1 : pos + 9])[0]
+            i_val = struct.unpack("<q", data[pos + 1 : pos + 9])[0]
+        except struct.error:
+            pos += 1
+            continue
+
+        ts = None
+        if LO_S < d_val < HI_S:
+            ts = _cocoa_ts(d_val)
+        elif LO_NS < i_val < HI_NS:
+            ts = _cocoa_ts(i_val / 1_000_000_000)
+
+        if ts is not None:
+            search_start = max(0x20, pos - 50)
+            search_end = min(len(data), pos + 250)
+            strings = _extract_protobuf_strings(data, search_start, search_end)
+            last_ts_pos = pos
+            body_hits += 1
+            yield ts, strings
 
         pos += 1
+
+    # Header-timestamp fallback for sparse streams. The SEGB header carries
+    # a float64 Cocoa-seconds value at bytes 0x08..0x10 representing the
+    # segment's creation time.
+    if body_hits == 0:
+        try:
+            h_val = struct.unpack("<d", data[0x08:0x10])[0]
+        except struct.error:
+            return
+        if LO_S < h_val < HI_S:
+            ts = _cocoa_ts(h_val)
+            strings = _extract_protobuf_strings(data, 0x20, len(data))
+            if strings:
+                yield ts, strings
 
 
 # ── Record Descriptors ───────────────────────────────────────────────────
@@ -436,8 +500,14 @@ class MacOSBiomePlugin(Plugin):
 
     @export(record=BiomeGenericRecord)
     def bluetooth(self) -> Iterator[BiomeGenericRecord]:
-        """Parse Device.Wireless.Bluetooth — Bluetooth connection events."""
-        yield from self._parse_stream_generic("Device.Wireless.Bluetooth")
+        """Parse Bluetooth events. Reads both ``Device.Wireless.Bluetooth``
+        (pre-Tahoe) and ``Device.Wireless.BluetoothNearbyDevice`` (Tahoe+) —
+        Apple renamed the stream in macOS 26."""
+        for stream in (
+            "Device.Wireless.Bluetooth",
+            "Device.Wireless.BluetoothNearbyDevice",
+        ):
+            yield from self._parse_stream_generic(stream)
 
     @export(record=BiomeGenericRecord)
     def wifi(self) -> Iterator[BiomeGenericRecord]:
@@ -558,3 +628,84 @@ class MacOSBiomePlugin(Plugin):
     def screen_sharing(self) -> Iterator[BiomeGenericRecord]:
         """Parse Screen.Sharing — screen sharing sessions."""
         yield from self._parse_stream_generic("Screen.Sharing")
+
+    # ── Tahoe / Apple Intelligence streams (macOS 26+) ───────────────────
+
+    @export(record=BiomeGenericRecord)
+    def apple_intelligence_tasks(self) -> Iterator[BiomeGenericRecord]:
+        """Parse the ``Lighthouse.Ledger.*`` stream family — Apple
+        Intelligence's task execution ledger introduced in Tahoe.
+
+        Captures, per record: which background AI / Siri task ran, its
+        lifecycle phase (start / load / process / upload / finished),
+        status transitions (Running / Completed / Not Started), and any
+        emitted telemetry or errors. The ``strings`` field carries the
+        task identifier (e.g. ``com.apple.aiml.mlpt.FedStats.MLHostPlugin.
+        Message-Spam-Detection``) plus the phase/status token.
+        """
+        for stream in (
+            "Lighthouse.Ledger.TaskCustomEvent",
+            "Lighthouse.Ledger.TaskStatus",
+            "Lighthouse.Ledger.TaskTelemetry",
+            "Lighthouse.Ledger.TaskError",
+            "Lighthouse.Ledger.TrialdEvent",
+            "Lighthouse.Ledger.LighthousePluginEvent",
+            "Lighthouse.Ledger.DeviceTelemetry",
+            "Lighthouse.Ledger.DediscoPrivacyEvent",
+            "Lighthouse.Ledger.MlruntimedEvent",
+        ):
+            yield from self._parse_stream_generic(stream)
+
+    @export(record=BiomeGenericRecord)
+    def system_settings_search(self) -> Iterator[BiomeGenericRecord]:
+        """Parse ``SystemSettings.SearchTerms`` — Tahoe+ stream recording
+        every query typed into the System Settings search box (e.g. the
+        user typing ``shar`` to find Bluetooth Sharing). Forensically
+        useful: directly attributes intent to the user."""
+        yield from self._parse_stream_generic("SystemSettings.SearchTerms")
+
+    @export(record=BiomeGenericRecord)
+    def ai_model_catalog(self) -> Iterator[BiomeGenericRecord]:
+        """Parse AI model asset delivery and catalog subscription streams.
+
+        - ``AppleIntelligence.Reporting.AssetDeliveryLog.ModelCatalog`` —
+          which Apple foundation models the device fetched, when, for
+          which Apple Intelligence use case
+          (e.g. ``memoryCreation.AssetCurationOutlier``).
+        - ``ModelCatalog.Subscriptions.Decisions`` — model subscription
+          decisions (whether each use case opted into a model).
+        """
+        for stream in (
+            "AppleIntelligence.Reporting.AssetDeliveryLog.ModelCatalog",
+            "ModelCatalog.Subscriptions.Decisions",
+        ):
+            yield from self._parse_stream_generic(stream)
+
+    @export(record=BiomeGenericRecord)
+    def generative_functions(self) -> Iterator[BiomeGenericRecord]:
+        """Parse ``GenerativeModels.GenerativeFunctions.Instrumentation`` —
+        Apple Intelligence per-request instrumentation. Records each
+        generative-AI invocation: which function (e.g.
+        ``summarization.summarizeMailMessage``), source app
+        (``com.apple.mail``), source record id, model used, and lifecycle
+        events (``executeRequest.begin`` / ``transitionAsset``). High
+        forensic value: per-prompt trace of every AI feature the user
+        triggered."""
+        yield from self._parse_stream_generic(
+            "GenerativeModels.GenerativeFunctions.Instrumentation"
+        )
+
+    @export(record=BiomeGenericRecord)
+    def siri_remembers(self) -> Iterator[BiomeGenericRecord]:
+        """Parse the ``Siri.Remembers.*`` stream family — Siri's persistent
+        memory of past user interactions. Includes message history,
+        interaction history, call history, audio history, and assistant
+        suggestions where present."""
+        for stream in (
+            "Siri.Remembers.MessageHistory",
+            "Siri.Remembers.InteractionHistory",
+            "Siri.Remembers.CallHistory",
+            "Siri.Remembers.AudioHistory",
+            "Siri.Remembers.AssistantSuggestions",
+        ):
+            yield from self._parse_stream_generic(stream)
