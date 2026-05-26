@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import sqlite3
 import struct
+import tempfile
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
@@ -133,14 +135,22 @@ def _is_numeric_token(s):
     return len(s) >= 2 and s[0] in ("f", "i") and (s[1].isdigit() or s[1] in "-+")
 
 
+def _filter_real_strings(strings):
+    """Drop numeric tokens (varint/fixed32) emitted as ``i123`` / ``f1.2e-3``
+    by ``_extract_protobuf_strings``. They're byte-alignment artifacts —
+    random bytes that happen to look like a valid protobuf tag followed by
+    a varint or float. Removing them everywhere makes the ``strings``
+    field readable and prevents polluting field-indexed lookups (e.g.
+    ``app_in_focus`` picks bundle_id from field 6 — if a noise token at
+    field 6 sneaks in, the dict lookup picks the wrong value)."""
+    return [(fnum, s) for fnum, s in strings if not _is_numeric_token(s)]
+
+
 def _join_strings(strings, stream_name):
-    """Join extracted tokens, dropping numeric-junk for streams known to
-    carry only sensor numerics in their payload."""
-    if stream_name in _NUMERIC_NOISE_STREAMS:
-        tokens = [s for _, s in strings if not _is_numeric_token(s)]
-    else:
-        tokens = [s for _, s in strings]
-    return " | ".join(tokens)
+    """Join extracted tokens with numeric-junk filtered out globally.
+    ``stream_name`` is kept for backwards-compatibility with callers but is
+    no longer used to decide noise filtering — numerics are always dropped."""
+    return " | ".join(s for _, s in _filter_real_strings(strings))
 
 
 def _parse_segb_records(data):
@@ -279,6 +289,59 @@ BiomeGenericRecord = TargetRecordDescriptor(
         ("string", "stream_name"),
         ("string", "strings"),
         ("string", "segment"),
+        ("path", "source"),
+    ],
+)
+
+BiomeEntityRecord = TargetRecordDescriptor(
+    "macos/biome/entity",
+    [
+        ("string", "entity_type"),
+        ("string", "identifier"),
+        ("string", "name"),
+        ("string", "details"),
+        ("path", "source"),
+    ],
+)
+
+BiomeEntityChangeRecord = TargetRecordDescriptor(
+    "macos/biome/entity_change",
+    [
+        ("datetime", "ts"),
+        ("string", "entity_type"),
+        ("string", "subject"),
+        ("path", "source"),
+    ],
+)
+
+BiomeRecentAppRecord = TargetRecordDescriptor(
+    "macos/biome/recent_app",
+    [
+        ("datetime", "ts_event"),
+        ("string", "bundle_id"),
+        ("string", "parent_bundle_id"),
+        ("string", "short_version"),
+        ("string", "exact_version"),
+        ("string", "launch_reason"),
+        ("varint", "launch_type"),
+        ("float", "duration"),
+        ("varint", "starting"),
+        ("varint", "native_arch"),
+        ("string", "extension_host"),
+        ("path", "source"),
+    ],
+)
+
+BiomeCloudSyncRecord = TargetRecordDescriptor(
+    "macos/biome/cloud_sync",
+    [
+        ("datetime", "ts_start"),
+        ("datetime", "ts_end"),
+        ("string", "session_id"),
+        ("varint", "transport"),
+        ("varint", "reason"),
+        ("varint", "is_reciprocal"),
+        ("varint", "time_since_previous_sync"),
         ("path", "source"),
     ],
 )
@@ -439,7 +502,9 @@ class MacOSBiomePlugin(Plugin):
         for path, _data_source, data in self._iter_stream("App.InFocus"):
             try:
                 for ts, strings in _parse_segb_records(data):
-                    str_dict = dict(strings)
+                    # Filter numerics so noise tokens at field-num 6 or 9
+                    # don't shadow the real bundle_id / version strings.
+                    str_dict = dict(_filter_real_strings(strings))
                     bundle_id = str_dict.get(6, "")
                     version = str_dict.get(9, "")
                     if bundle_id:
@@ -462,7 +527,7 @@ class MacOSBiomePlugin(Plugin):
         for path, _data_source, data in self._iter_stream("App.Intent"):
             try:
                 for ts, strings in _parse_segb_records(data):
-                    str_vals = [val for _, val in strings]
+                    str_vals = [val for _, val in _filter_real_strings(strings)]
                     bundle_id = intent_class = intent_verb = ""
                     for val in str_vals:
                         if "." in val and not val.startswith("IN") and not val.startswith("Send"):
@@ -792,3 +857,275 @@ class MacOSBiomePlugin(Plugin):
         directly with ``wifiintelligence.person_interactions`` /
         ``entity_aliases`` write events."""
         yield from self._parse_stream_generic("IntelligencePlatform.Views.Updated")
+
+    # ── Biome SQLite databases ───────────────────────────────────────────
+    #
+    # In addition to the SEGB streams, Biome maintains several SQLite stores
+    # under ~/Library/Biome/ that hold *structured* relational data — entity
+    # graphs, recently launched apps, and CloudKit sync sessions. These are
+    # entirely separate from the streams/ tree and need their own parsers.
+
+    def _open_sqlite(self, db_path):
+        with db_path.open("rb") as fh:
+            data = fh.read()
+        tmp = tempfile.NamedTemporaryFile(suffix=".db")  # noqa: SIM115
+        tmp.write(data)
+        tmp.flush()
+        for suffix in ("-wal", "-shm"):
+            src = db_path.parent.joinpath(db_path.name + suffix)
+            if src.exists():
+                with src.open("rb") as sf, open(tmp.name + suffix, "wb") as df:  # noqa: PTH123
+                    df.write(sf.read())
+        conn = sqlite3.connect(tmp.name)
+        conn.row_factory = sqlite3.Row
+        return conn, tmp
+
+    @export(record=BiomeEntityRecord)
+    def entities(self) -> Iterator[BiomeEntityRecord]:
+        """Parse ``~/Library/Biome/databases/IntelligencePlatform.Entity/``
+        ``IntelligencePlatform.Entity.sqlite3`` — the on-device entity graph
+        that Apple Intelligence builds from messages, contacts, mail, photos,
+        and calendars. Surfaces Person, Location, FlightReservation,
+        SportsTeam, HolidayEvent, and software entities under a unified
+        ``entity_type`` discriminator."""
+        for db_path in self.target.fs.path("/").glob(
+            "Users/*/Library/Biome/databases/IntelligencePlatform.Entity/IntelligencePlatform.Entity.sqlite3"
+        ):
+            try:
+                yield from self._parse_entities(db_path)
+            except Exception as e:
+                self.target.log.warning("Error parsing IntelligencePlatform.Entity %s: %s", db_path, e)
+
+    def _parse_entities(self, db_path):
+        conn, tmp = self._open_sqlite(db_path)
+        try:
+            cur = conn.cursor()
+            tables = {r[0] for r in cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()}
+            specs = [
+                # (table, kind, identifier_col, fields_to_keep)
+                ("Person", "person", "identifier",
+                 ["fullName", "names", "emailAddresses", "phoneNumbers",
+                  "url", "employer", "personRelationship", "dateOfBirth",
+                  "isCurrentUser"]),
+                ("Location", "location", "identifier",
+                 ["name", "address", "latitude", "longitude", "country",
+                  "thoroughfare", "locality", "postalCode"]),
+                ("FlightReservations", "flight_reservation", "identifier",
+                 ["flightNumber", "carrierCode", "departureAirportCode",
+                  "departureAirportName", "departureTime",
+                  "arrivalAirportCode", "arrivalAirportName", "arrivalTime",
+                  "passengerNames", "extractionSource"]),
+                ("HolidayEvent", "holiday", "identifier",
+                 ["name", "occurances", "alternateIds", "isA"]),
+                ("SportsTeams", "sports_team", "identifier",
+                 ["name", "league", "shortName", "sport", "url"]),
+                ("software", "software", "identifier",
+                 ["name", "version", "publisher", "url"]),
+            ]
+            for table, kind, ident_col, _ in specs:
+                if table not in tables:
+                    continue
+                cols = {r[1] for r in cur.execute(f"PRAGMA table_info({table})").fetchall()}
+                try:
+                    cur.execute(f"SELECT * FROM {table}")  # noqa: S608
+                except sqlite3.OperationalError:
+                    continue
+                for row in cur:
+                    detail_parts = []
+                    for col_name in cols:
+                        if col_name in (ident_col, "subject"):
+                            continue
+                        v = row[col_name] if col_name in row.keys() else None
+                        if v is None or v == "" or (isinstance(v, (int, float)) and v == 0):
+                            continue
+                        detail_parts.append(f"{col_name}={v}")
+                    yield BiomeEntityRecord(
+                        entity_type=kind,
+                        identifier=str(row[ident_col] if ident_col in row.keys() else (
+                            row["subject"] if "subject" in row.keys() else ""
+                        )),
+                        name=(row["name"] if "name" in row.keys() else None)
+                        or (row["fullName"] if "fullName" in row.keys() else None)
+                        or "",
+                        details=" | ".join(detail_parts[:12]),
+                        source=db_path,
+                        _target=self.target,
+                    )
+        finally:
+            conn.close()
+            tmp.close()
+
+    @export(record=BiomeEntityChangeRecord)
+    def entity_changes(self) -> Iterator[BiomeEntityChangeRecord]:
+        """Parse the ``*Changes`` audit tables in ``IntelligencePlatform.
+        Entity.sqlite3`` — every time the OS updated an entity it wrote a
+        row with the (Cocoa-epoch) timestamp. Gives a per-entity
+        modification timeline that's invaluable for case work."""
+        for db_path in self.target.fs.path("/").glob(
+            "Users/*/Library/Biome/databases/IntelligencePlatform.Entity/IntelligencePlatform.Entity.sqlite3"
+        ):
+            try:
+                yield from self._parse_entity_changes(db_path)
+            except Exception as e:
+                self.target.log.warning(
+                    "Error parsing IntelligencePlatform.Entity changes %s: %s", db_path, e
+                )
+
+    def _parse_entity_changes(self, db_path):
+        conn, tmp = self._open_sqlite(db_path)
+        try:
+            cur = conn.cursor()
+            tables = [
+                r[0] for r in cur.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%Changes'"
+                ).fetchall()
+            ]
+            for tbl in tables:
+                entity_type = tbl[:-len("Changes")] if tbl.endswith("Changes") else tbl
+                try:
+                    cur.execute(f"SELECT subject, updatedTimestamp FROM {tbl}")  # noqa: S608
+                except sqlite3.OperationalError:
+                    continue
+                for row in cur:
+                    yield BiomeEntityChangeRecord(
+                        ts=_cocoa_ts(row["updatedTimestamp"]),
+                        entity_type=entity_type,
+                        subject=str(row["subject"] or ""),
+                        source=db_path,
+                        _target=self.target,
+                    )
+
+        finally:
+            conn.close()
+            tmp.close()
+
+    @export(record=BiomeRecentAppRecord)
+    def recent_apps(self) -> Iterator[BiomeRecentAppRecord]:
+        """Parse ``~/Library/Biome/databases/Games.RecentlyPlayed/Games.
+        RecentlyPlayed.sqlite3`` — despite the name this table captures
+        EVERY foreground app launch the OS observed (the "AppsRecently
+        Focused" aggregation that Game Center and Spotlight reuse).
+        Includes bundle id, version, launch reason, duration, and the
+        event timestamp."""
+        for db_path in self.target.fs.path("/").glob(
+            "Users/*/Library/Biome/databases/Games.RecentlyPlayed/Games.RecentlyPlayed.sqlite3"
+        ):
+            try:
+                yield from self._parse_recent_apps(db_path)
+            except Exception as e:
+                self.target.log.warning("Error parsing Games.RecentlyPlayed %s: %s", db_path, e)
+
+    def _parse_recent_apps(self, db_path):
+        conn, tmp = self._open_sqlite(db_path)
+        try:
+            cur = conn.cursor()
+            tables = {r[0] for r in cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()}
+            table = "appsrecentlyfocused_keyedFirstMatchingRecord"
+            if table not in tables:
+                return
+            cols = {r[1] for r in cur.execute(f"PRAGMA table_info({table})").fetchall()}
+
+            def has(c):
+                return c if c in cols else "NULL"
+
+            select = ", ".join([
+                f"{has('bundleid')} AS bundle_id",
+                f"{has('parentbundleid')} AS parent_bundle_id",
+                f"{has('eventtimestamp')} AS ts_event",
+                f"{has('exactversionstring')} AS version",
+                f"{has('shortversionstring')} AS short_version",
+                f"{has('launchreason')} AS launch_reason",
+                f"{has('launchtype')} AS launch_type",
+                f"{has('duration')} AS duration",
+                f"{has('starting')} AS starting",
+                f"{has('isnativearchitecture')} AS native",
+                f"{has('extensionhostid')} AS ext_host",
+                f"{has('displaytype')} AS display_type",
+            ])
+            cur.execute(f"SELECT {select} FROM {table} ORDER BY ts_event DESC")  # noqa: S608
+            for row in cur:
+                # appsrecentlyfocused uses UNIX-epoch seconds, NOT the usual
+                # Cocoa epoch — verified against actual data.
+                ts = None
+                if row["ts_event"]:
+                    try:
+                        ts = datetime.fromtimestamp(float(row["ts_event"]), tz=timezone.utc)
+                    except (OSError, OverflowError, ValueError, TypeError):
+                        ts = None
+                yield BiomeRecentAppRecord(
+                    ts_event=ts,
+                    bundle_id=row["bundle_id"] or "",
+                    parent_bundle_id=row["parent_bundle_id"] or "",
+                    short_version=row["short_version"] or "",
+                    exact_version=row["version"] or "",
+                    launch_reason=row["launch_reason"] or "",
+                    launch_type=row["launch_type"] or 0,
+                    duration=row["duration"] or 0.0,
+                    starting=row["starting"] or 0,
+                    native_arch=row["native"] or 0,
+                    extension_host=row["ext_host"] or "",
+                    source=db_path,
+                    _target=self.target,
+                )
+        finally:
+            conn.close()
+            tmp.close()
+
+    @export(record=BiomeCloudSyncRecord)
+    def cloud_sync(self) -> Iterator[BiomeCloudSyncRecord]:
+        """Parse ``~/Library/Biome/sync/sync.db``'s ``SyncSessionLog`` table
+        — every Biome→iCloud sync session with start / end timestamps,
+        transport (Wi-Fi / cellular), reason, reciprocal flag, and the gap
+        since the previous sync."""
+        for db_path in self.target.fs.path("/").glob(
+            "Users/*/Library/Biome/sync/sync.db"
+        ):
+            try:
+                yield from self._parse_cloud_sync(db_path)
+            except Exception as e:
+                self.target.log.warning("Error parsing Biome sync.db %s: %s", db_path, e)
+
+    def _parse_cloud_sync(self, db_path):
+        conn, tmp = self._open_sqlite(db_path)
+        try:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    "SELECT session_id, start_timestamp, end_timestamp, transport, "
+                    "reason, is_reciprocal, time_since_previous_sync FROM SyncSessionLog"
+                )
+            except sqlite3.OperationalError:
+                return
+            for row in cur:
+                # Apple uses Cocoa-nanosecond timestamps here on Tahoe.
+                def _ns_to_cocoa(v):
+                    if v is None:
+                        return None
+                    try:
+                        v = float(v)
+                        # heuristic: > 1e15 is ns, else seconds
+                        seconds = v / 1_000_000_000 if abs(v) > 1e12 else v
+                        return _cocoa_ts(seconds)
+                    except Exception:
+                        return None
+                sid = row["session_id"]
+                if isinstance(sid, (bytes, memoryview)):
+                    sid = bytes(sid).hex()
+                yield BiomeCloudSyncRecord(
+                    ts_start=_ns_to_cocoa(row["start_timestamp"]),
+                    ts_end=_ns_to_cocoa(row["end_timestamp"]),
+                    session_id=str(sid or ""),
+                    transport=row["transport"] or 0,
+                    reason=row["reason"] or 0,
+                    is_reciprocal=row["is_reciprocal"] or 0,
+                    time_since_previous_sync=row["time_since_previous_sync"] or 0,
+                    source=db_path,
+                    _target=self.target,
+                )
+        finally:
+            conn.close()
+            tmp.close()
