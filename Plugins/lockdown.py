@@ -54,10 +54,23 @@ class MacOSLockdownPlugin(Plugin):
         if not self._plists:
             raise UnsupportedPluginError("No Lockdown pairing records found")
 
+    # Sibling plists in /private/var/db/lockdown/ that AREN'T device pairings:
+    # ``SystemConfiguration.plist`` (lockdownd's own state), the
+    # ``Whitelist.plist`` (a list of cleared apps), and the ``escrow`` /
+    # ``pair-records`` subdirectory metadata. Drop them so we only emit real
+    # paired devices.
+    _NON_PAIRING_PLISTS = frozenset({
+        "SystemConfiguration.plist",
+        "Whitelist.plist",
+        "wgs.plist",
+    })
+
     @export(record=LockdownDeviceRecord)
     def paired(self) -> Iterator[LockdownDeviceRecord]:
         """One record per paired iOS device — UDID, model, serial, MACs, ECID."""
         for p in self._plists:
+            if p.name in self._NON_PAIRING_PLISTS:
+                continue
             try:
                 with p.open("rb") as fh:
                     data = plistlib.load(fh)

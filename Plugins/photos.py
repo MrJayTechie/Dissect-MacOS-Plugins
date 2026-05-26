@@ -266,9 +266,16 @@ class ApplePhotosPlugin(Plugin):
                 count_col = "ZFACECOUNT" if "ZFACECOUNT" in cols else (
                     "ZCACHEDFACECOUNT" if "ZCACHEDFACECOUNT" in cols else "0"
                 )
+                # Photos creates one ZPERSON row per face cluster — most are
+                # unnamed (the user hasn't tagged them). Order so named
+                # clusters appear first; emit all rows so the analyst can
+                # count unnamed clusters too but the leading rows carry the
+                # most signal.
                 cur.execute(
                     f"SELECT {name_col} AS full_name, ZPERSONUUID AS uuid, "  # noqa: S608
-                    f"{count_col} AS face_count FROM ZPERSON"
+                    f"{count_col} AS face_count FROM ZPERSON "
+                    f"ORDER BY CASE WHEN {name_col} IS NULL OR {name_col} = '' "
+                    "THEN 1 ELSE 0 END, face_count DESC"
                 )
                 for row in cur:
                     yield PhotosPersonRecord(

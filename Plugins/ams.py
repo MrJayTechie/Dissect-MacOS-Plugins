@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from dissect.target.exceptions import UnsupportedPluginError
@@ -22,11 +22,15 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 
-def _unix_ts(v):
-    if not v:
+COCOA_EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)
+
+
+def _cocoa_ts(v):
+    """AMS uses CFAbsoluteTime (seconds since 2001-01-01) in lastModified."""
+    if v is None:
         return None
     try:
-        return datetime.fromtimestamp(float(v), tz=timezone.utc)
+        return COCOA_EPOCH + timedelta(seconds=float(v))
     except (OSError, OverflowError, ValueError, TypeError):
         return None
 
@@ -97,7 +101,7 @@ class AppleMediaServicesPlugin(Plugin):
                     continue
                 for row in cur:
                     yield AMSContentRecord(
-                        ts_modified=_unix_ts(row["lastModified"]),
+                        ts_modified=_cocoa_ts(row["lastModified"]),
                         cache_key=row["cacheKey"] or "",
                         version=row["version"] or "",
                         task_identifier=row["taskIdentifier"] or "",

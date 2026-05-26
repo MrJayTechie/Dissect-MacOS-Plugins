@@ -96,33 +96,46 @@ class AppleShortcutsPlugin(Plugin):
             ).fetchall()}
             if "Tools" not in tables:
                 return
-            cols = {r[1] for r in cur.execute("PRAGMA table_info(Tools)").fetchall()}
 
-            def col(*names, default="NULL"):
-                for n in names:
-                    if n in cols:
-                        return n
-                return default
+            # The Tools table only holds the toolkit identifier + tool type;
+            # human-readable name + description come from ToolLocalizations
+            # (one row per locale) and the source container metadata
+            # (bundleIdentifier, teamId, version) from ContainerMetadata.
+            has_loc = "ToolLocalizations" in tables
+            has_meta = "ContainerMetadata" in tables
 
-            ident = col("identifier", "id")
-            name_col = col("name", "displayName", "title")
-            sub_col = col("subtitle", "summary", "description")
-            bundle_col = col("bundleIdentifier", "bundleID")
-            cat_col = col("categoryID", "category")
-            lang_col = col("language", "locale")
-            cur.execute(
-                f"SELECT {ident} AS ident, {name_col} AS name, "  # noqa: S608
-                f"{sub_col} AS sub, {bundle_col} AS bundle, "
-                f"{cat_col} AS cat, {lang_col} AS lang FROM Tools"
+            select = [
+                "t.id AS ident",
+                "t.toolType AS tool_type",
+                ("loc.name" if has_loc else "''") + " AS name",
+                ("loc.descriptionSummary" if has_loc else "''") + " AS sub",
+                ("loc.locale" if has_loc else "''") + " AS locale",
+                ("cm.id" if has_meta else "''") + " AS bundle",
+            ]
+            joins = []
+            if has_loc:
+                joins.append(
+                    "LEFT JOIN ToolLocalizations loc ON loc.toolId = t.rowId "
+                    "AND loc.locale = 'en'"
+                )
+            if has_meta:
+                joins.append(
+                    "LEFT JOIN ContainerMetadata cm ON cm.rowId = t.sourceContainerId"
+                )
+
+            query = (
+                f"SELECT {', '.join(select)} FROM Tools t "  # noqa: S608
+                + " ".join(joins)
             )
+            cur.execute(query)
             for row in cur:
                 yield ShortcutToolRecord(
                     identifier=str(row["ident"] or ""),
                     name=row["name"] or "",
                     subtitle=row["sub"] or "",
                     bundle_id=row["bundle"] or "",
-                    category=str(row["cat"] or ""),
-                    language=row["lang"] or "",
+                    category=str(row["tool_type"] or ""),
+                    language=row["locale"] or "",
                     source=db_path,
                     _target=self.target,
                 )
