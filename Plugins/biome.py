@@ -25,18 +25,22 @@ def _cocoa_ts(value):
 
 
 def _extract_protobuf_strings(data, start, end):
-    """Extract length-delimited strings from a protobuf fragment. Only
-    strings — callers like `app_in_focus` position-index this list by
-    protobuf field number and assume the entries are real text, so mixing
-    in numerics would scramble those columns.
+    """Extract length-delimited strings and typed numerics from a protobuf
+    fragment. Streams that carry only numeric payloads (display brightness,
+    WiFi RSSI, bluetooth link quality) produce no strings under a text-only
+    extractor, which is why biome.display / biome.wifi used to emit rows
+    with nothing but a timestamp. Surfacing varints and floats alongside
+    strings keeps those streams useful without per-stream protobuf schemas.
     """
     strings = []
+    numerics = []
     pos = start
     while pos < end - 2:
         tag = data[pos]
         wire = tag & 0x07
         field_num = tag >> 3
-        if wire == 2 and tag > 0x08:  # length-delimited (strings, sub-messages)
+        # wire type 2 — length-delimited (strings, sub-messages)
+        if wire == 2 and tag > 0x08:
             slen = data[pos + 1]
             if 2 < slen < 200 and pos + 2 + slen <= end:
                 try:
@@ -45,29 +49,16 @@ def _extract_protobuf_strings(data, start, end):
                         strings.append((field_num, s))
                 except UnicodeDecodeError:
                     pass
-        pos += 1
-    return strings
-
-
-def _extract_protobuf_numerics(data, start, end):
-    """Extract varints and fixed32 floats from a protobuf fragment.
-    Separate from the string extractor so callers that specifically need
-    identifier strings (bundle ids, intent names) aren't polluted by
-    numeric payloads. Streams carrying only numeric state (display
-    brightness, WiFi RSSI) opt in to these via the generic parser.
-    """
-    numerics = []
-    pos = start
-    while pos < end - 2:
-        tag = data[pos]
-        wire = tag & 0x07
-        field_num = tag >> 3
-        if wire == 0 and tag > 0x08:  # varint
+        # wire type 0 — varint (booleans, ints, enum codes)
+        elif wire == 0 and tag > 0x08:
             v, new_pos = _read_varint(data, pos + 1, end)
-            if v is not None and new_pos - pos <= 10 and 0 <= v < 1 << 32:
-                numerics.append((field_num, f"i{v}"))
-                pos = new_pos - 1
-        elif wire == 5 and tag > 0x08 and pos + 5 <= end:  # fixed32
+            if v is not None and new_pos - pos <= 10:
+                # Skip very large values — usually bad alignment
+                if 0 <= v < 1 << 32:
+                    numerics.append((field_num, f"i{v}"))
+                pos = new_pos - 1  # -1 because outer loop does pos += 1
+        # wire type 5 — fixed32 (floats, int32)
+        elif wire == 5 and tag > 0x08 and pos + 5 <= end:
             try:
                 f = struct.unpack("<f", data[pos + 1 : pos + 5])[0]
                 if -1e9 < f < 1e9:
@@ -75,7 +66,7 @@ def _extract_protobuf_numerics(data, start, end):
             except struct.error:
                 pass
         pos += 1
-    return numerics
+    return strings + numerics
 
 
 def _read_varint(data, pos, end):
@@ -93,14 +84,43 @@ def _read_varint(data, pos, end):
     return None, pos
 
 
-def _parse_segb_records(data, include_numerics=False):
-    """Parse SEGB (Segmented Binary) file and yield (timestamp, strings)
-    or (timestamp, strings, numerics) tuples.
+# Streams whose protobuf payloads are dominated by sensor numerics
+# (brightness deltas, RSSI, link quality). The numeric fallback in
+# _extract_protobuf_strings turns these into unreadable junk like
+# "f1.401e-45 | f-1.01e+05 | i1 …" — those bytes are alignment artifacts,
+# not real values. For these streams, drop numerics and emit only real
+# strings (UUIDs, bundle ids) plus the timestamp.
+_NUMERIC_NOISE_STREAMS = frozenset({
+    "Device.Display.Backlight",
+    "Device.Wireless.WiFi",
+    "Device.Wireless.Bluetooth",
+    "Notification.Usage",
+    "UserFocus.InferredMode",
+    "UserFocus.ComputedMode",
+})
 
-    Scans the entire file for Cocoa float64 timestamps in protobuf fixed64
-    fields, then extracts nearby protobuf string fields for context. When
-    ``include_numerics`` is true, also yields decoded varint/fixed32 values
-    (needed for streams like Display/WiFi that carry only numeric payloads).
+
+def _is_numeric_token(s):
+    """A token from _extract_protobuf_strings's numeric fallback starts
+    with 'f' or 'i' followed by a digit, '-' or '+'."""
+    return len(s) >= 2 and s[0] in ("f", "i") and (s[1].isdigit() or s[1] in "-+")
+
+
+def _join_strings(strings, stream_name):
+    """Join extracted tokens, dropping numeric-junk for streams known to
+    carry only sensor numerics in their payload."""
+    if stream_name in _NUMERIC_NOISE_STREAMS:
+        tokens = [s for _, s in strings if not _is_numeric_token(s)]
+    else:
+        tokens = [s for _, s in strings]
+    return " | ".join(tokens)
+
+
+def _parse_segb_records(data):
+    """Parse SEGB (Segmented Binary) file and yield (timestamp, strings) tuples.
+
+    Scans the entire file for Cocoa float64 timestamps in protobuf fixed64 fields,
+    then extracts nearby protobuf string fields for context.
     """
     if len(data) < 0x30 or data[:4] != b"SEGB":
         return
@@ -123,11 +143,7 @@ def _parse_segb_records(data, include_numerics=False):
                 search_end = min(len(data), pos + 250)
                 strings = _extract_protobuf_strings(data, search_start, search_end)
                 last_ts_pos = pos
-                if include_numerics:
-                    numerics = _extract_protobuf_numerics(data, search_start, search_end)
-                    yield ts, strings, numerics
-                else:
-                    yield ts, strings
+                yield ts, strings
 
         pos += 1
 
@@ -278,30 +294,12 @@ class MacOSBiomePlugin(Plugin):
             except Exception as e:
                 self.target.log.warning("Error reading biome stream %s: %s", path, e)
 
-    # Streams whose payload is purely numeric (no useful strings in the
-    # protobuf) benefit from numerics dumped into the `strings` column.
-    _NUMERIC_STREAMS = {
-        "Device.Display.Backlight",
-        "Device.Wireless.WiFi",
-        "Device.Wireless.Bluetooth",
-        "Device.Power.LowPowerMode",
-        "_DKEvent.Device.LowPowerMode",
-        "_DKEvent.Activity.Level",
-    }
-
     def _parse_stream_generic(self, stream_name):
         """Generic parser that yields BiomeGenericRecord for any stream."""
-        want_numerics = stream_name in self._NUMERIC_STREAMS
         for path, _data_source, data in self._iter_stream(stream_name):
             try:
-                for record in _parse_segb_records(data, include_numerics=want_numerics):
-                    if want_numerics:
-                        ts, strings, numerics = record
-                        parts = [s for _, s in strings] + [n for _, n in numerics]
-                    else:
-                        ts, strings = record
-                        parts = [s for _, s in strings]
-                    str_vals = " | ".join(parts)
+                for ts, strings in _parse_segb_records(data):
+                    str_vals = _join_strings(strings, stream_name)
                     yield BiomeGenericRecord(
                         ts=ts,
                         stream_name=stream_name,
@@ -344,7 +342,7 @@ class MacOSBiomePlugin(Plugin):
             for path, data_source, data in self._iter_stream(stream_name):
                 try:
                     for ts, strings in _parse_segb_records(data):
-                        str_vals = " | ".join(s for _, s in strings)
+                        str_vals = _join_strings(strings, stream_name)
                         yield BiomeStreamRecord(
                             ts=ts,
                             stream_name=stream_name,
@@ -535,6 +533,11 @@ class MacOSBiomePlugin(Plugin):
     def harvested_mail(self) -> Iterator[BiomeGenericRecord]:
         """Parse ProactiveHarvesting.Mail — harvested mail metadata."""
         yield from self._parse_stream_generic("ProactiveHarvesting.Mail")
+
+    @export(record=BiomeGenericRecord)
+    def intelligence_donations(self) -> Iterator[BiomeGenericRecord]:
+        """Parse IntelligenceEngine.Interaction.Donation — Siri intelligence donations."""
+        yield from self._parse_stream_generic("IntelligenceEngine.Interaction.Donation")
 
     @export(record=BiomeGenericRecord)
     def siri_execution(self) -> Iterator[BiomeGenericRecord]:
