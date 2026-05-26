@@ -112,6 +112,18 @@ _NUMERIC_NOISE_STREAMS = frozenset({
     "Lighthouse.Ledger.MlruntimedEvent",
     "GenerativeModels.GenerativeFunctions.Instrumentation",
     "SystemSettings.SearchTerms",
+    "Siri.SELFProcessedEvent",
+    "Siri.Metrics.OnDeviceDigestUsageMetrics",
+    "Siri.Metrics.OnDeviceDigestSegmentsCohorts",
+    "Siri.Metrics.OnDeviceDigestExperimentMetrics",
+    "Siri.ODDI.ScorecardMetrics",
+    "Siri.PrivateLearning.SELFEvent",
+    "LLMCache.CacheManagerTelemetry",
+    "MediaAnalysis.VisualSearch.Processing",
+    "MediaAnalysis.PEC.Processing",
+    "Safari.WebPagePerformance",
+    "Safari.AutoPlay",
+    "IntelligencePlatform.Views.Updated",
 })
 
 
@@ -709,3 +721,74 @@ class MacOSBiomePlugin(Plugin):
             "Siri.Remembers.AssistantSuggestions",
         ):
             yield from self._parse_stream_generic(stream)
+
+    @export(record=BiomeGenericRecord)
+    def siri_self_events(self) -> Iterator[BiomeGenericRecord]:
+        """Parse ``Siri.SELFProcessedEvent`` — Siri's Self-Experience
+        Learning Framework processed events (Tahoe+). Each record marks an
+        on-device Siri interaction that fed personalisation/learning."""
+        yield from self._parse_stream_generic("Siri.SELFProcessedEvent")
+
+    @export(record=BiomeGenericRecord)
+    def siri_metrics(self) -> Iterator[BiomeGenericRecord]:
+        """Parse the ``Siri.Metrics.*`` and ``Siri.ODDI.*`` family — Siri's
+        on-device digest, scorecard, and analytics seeds. Useful for
+        attributing on-device Siri activity to a session."""
+        for stream in (
+            "Siri.Metrics.OnDeviceDigestUsageMetrics",
+            "Siri.Metrics.OnDeviceDigestSegmentsCohorts",
+            "Siri.Metrics.OnDeviceDigestExperimentMetrics",
+            "Siri.ODDI.ScorecardMetrics",
+            "Siri.AnalyticsIdentifiers.UserSeed",
+            "Siri.AnalyticsIdentifiers.UserSamplingId",
+            "Siri.AnalyticsIdentifiers.HomeSeed",
+            "Siri.Orchestration.RequestContext",
+            "Siri.PostSiriEngagement",
+            "Siri.PrivateLearning.SELFEvent",
+            "Siri.Memories.ReferenceResolution",
+        ):
+            yield from self._parse_stream_generic(stream)
+
+    @export(record=BiomeGenericRecord)
+    def llm_cache(self) -> Iterator[BiomeGenericRecord]:
+        """Parse ``LLMCache.CacheManagerTelemetry`` — Tahoe+ stream of
+        on-device LLM cache events (which generative-model responses were
+        cached / replayed)."""
+        yield from self._parse_stream_generic("LLMCache.CacheManagerTelemetry")
+
+    @export(record=BiomeGenericRecord)
+    def media_analysis(self) -> Iterator[BiomeGenericRecord]:
+        """Parse the ``MediaAnalysis.*`` family — Photos / Camera on-device
+        analysis events: visual search processing and PEC (Person-Entity
+        Centric) processing. Captures when the OS analysed photos."""
+        for stream in (
+            "MediaAnalysis.VisualSearch.Processing",
+            "MediaAnalysis.PEC.Processing",
+        ):
+            yield from self._parse_stream_generic(stream)
+
+    @export(record=BiomeGenericRecord)
+    def safari_extra(self) -> Iterator[BiomeGenericRecord]:
+        """Parse Tahoe-era Safari signals not covered by the other Safari
+        functions: ``Safari.WebPagePerformance`` (page-load perf) and
+        ``Safari.AutoPlay`` (sites that auto-played media)."""
+        for stream in (
+            "Safari.WebPagePerformance",
+            "Safari.AutoPlay",
+            "Safari.Browsing.Assistant",
+        ):
+            yield from self._parse_stream_generic(stream)
+
+    @export(record=BiomeGenericRecord)
+    def messages_shared(self) -> Iterator[BiomeGenericRecord]:
+        """Parse ``Messages.SharedWithYou.Feedback`` — interactions with
+        Shared-with-You content surfaced from Messages."""
+        yield from self._parse_stream_generic("Messages.SharedWithYou.Feedback")
+
+    @export(record=BiomeGenericRecord)
+    def intelligence_views_updated(self) -> Iterator[BiomeGenericRecord]:
+        """Parse ``IntelligencePlatform.Views.Updated`` — emitted whenever
+        the Intelligence Platform's ``views.db`` is updated. Correlates
+        directly with ``wifiintelligence.person_interactions`` /
+        ``entity_aliases`` write events."""
+        yield from self._parse_stream_generic("IntelligencePlatform.Views.Updated")
