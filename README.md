@@ -1,20 +1,30 @@
-# Dissect Plugin Reference — macOS Triage
+# Dissect macOS Forensics Plugins
 
-## How to Run
+Custom plugins for the [Dissect](https://github.com/fox-it/dissect) forensics framework targeting macOS artefacts. Paired with the [Velociraptor macOS collector](https://github.com/MrJayTechie/MacOS-Velociraptor-Collectors).
 
-Point `target-query` at the extracted Velociraptor output's `uploads/auto` directory:
+**Tested on:** macOS 15 (Sequoia) and macOS 16 (Tahoe) — Apple Silicon and Intel.
+**Coverage:** 83 plugin modules, 232 exported functions.
+
+## Quick Start
 
 ```bash
-target-query --plugin-path <Plugin Path> -f <function> "<path-to-velo-output>/uploads/auto" -j
+pip install dissect.target
+
+# Optional: alias target-query
+alias target-query='python3 -m dissect.target.tools.query'
+
+# Live system
+target-query --plugin-path Plugins -f <namespace.function> local -j
+
+# Velociraptor collection (extract first)
+bsdtar -xf Collection-*.zip -C ~/dissect-collections/
+target-query --plugin-path Plugins \
+             -f <namespace.function> \
+             ~/dissect-collections/uploads/auto -j
 ```
 
-**Flags:**
-- `-j` — JSON output
-- `-s` — CSV/structured output
-- Drop both for human-readable output
-- `| head -20` — preview first 20 lines
-
-**Note:** Some artifacts require `sudo` if files are root-owned.
+**Flags:** `-j` JSON · `-s` structured (CSV-ish) · drop both for human-readable.
+Root-owned artefacts may need `sudo`.
 
 ---
 
@@ -24,246 +34,319 @@ target-query --plugin-path <Plugin Path> -f <function> "<path-to-velo-output>/up
 
 | Function | Description |
 |----------|-------------|
-| `shellhistory.entries` | Parse zsh/bash history files — commands with timestamps (zsh extended format only; plain lines emit null ts), duration, and shell type |
-| `knowledgec.app_usage` | Parse application usage events from knowledgeC.db — which apps were used and when |
+| `shellhistory.entries` | Parse shell history files (zsh extended format and plain commands) |
+| `knowledgec.app_usage` | Parse application usage events from knowledgeC.db |
 | `knowledgec.web_usage` | Parse web browsing events from knowledgeC.db |
-| `knowledgec.display` | Parse display backlight on/off state from knowledgeC.db |
-| `knowledgec.bluetooth` | Parse bluetooth connection events from knowledgeC.db |
 | `knowledgec.media_usage` | Parse media playback events from knowledgeC.db |
-| `knowledgec.notifications` | Parse notification events from knowledgeC.db (bundle id resolved via `ZSTRUCTUREDMETADATA`) |
+| `knowledgec.notifications` | Parse notification events from knowledgeC.db |
 | `knowledgec.intents` | Parse app intent events from knowledgeC.db |
+| `knowledgec.display` | Parse display backlight state from knowledgeC.db |
+| `knowledgec.bluetooth` | Parse bluetooth connection events from knowledgeC.db |
 | `knowledgec.discoverability` | Parse discoverability signal events from knowledgeC.db |
-| `knowledgec.histograms` | Parse activity level histograms from knowledgeC.db |
 | `knowledgec.sync_peers` | Parse synced device peers from knowledgeC.db |
-| `knowledgec.sources` | Parse registered event sources from knowledgeC.db (deduplicated bundle-only rows) |
-| `knowledgec.custom_metadata` | Parse custom metadata entries from knowledgeC.db (rows with all-NULL values filtered) |
+| `knowledgec.sources` | Parse registered event sources from knowledgeC.db |
+| `knowledgec.histograms` | Parse activity level histograms from knowledgeC.db |
+| `knowledgec.custom_metadata` | Parse custom metadata entries from knowledgeC.db |
+| `screentime.usage` | Parse ScreenTime app usage data |
+| `screentime.blocks` | Parse ScreenTime usage blocks |
 
 ### Biome (iOS/macOS Telemetry)
 
 | Function | Description |
 |----------|-------------|
-| `biome.all` | Parse all Biome streams into timestamped records with extracted strings |
 | `biome.streams` | List all available Biome streams with segment counts and sizes |
-| `biome.app_in_focus` | Which app had focus and when |
-| `biome.app_activity` | Application activity events |
-| `biome.app_intents` | App intents (messages, media, calls) |
-| `biome.now_playing` | Media playback events (Spotify, Apple Music, etc.) |
-| `biome.media_usage` | Media usage events |
-| `biome.wifi` | WiFi state events (numeric payload) |
-| `biome.wifi_connections` | WiFi connection/disconnection events |
-| `biome.bluetooth` | Bluetooth connection events |
-| `biome.display` | Display on/off state (numeric payload) |
-| `biome.location` | Semantic location data |
-| `biome.notifications` | Notification events |
-| `biome.screentime` | Screen Time app usage data |
-| `biome.safari_history` | Safari history events from DuetKnowledge |
-| `biome.safari_navigations` | Safari URL navigations |
-| `biome.safari_page_load` | Safari page load events |
-| `biome.safari_pageview` | Safari page views |
-| `biome.messages_read` | Message read events |
-| `biome.web_usage` | Web browsing events tracked by the OS |
-| `biome.user_focus` | Inferred Focus/Do Not Disturb mode |
-| `biome.user_focus_computed` | Computed Focus mode |
-| `biome.screen_sharing` | Screen sharing sessions |
-| `biome.siri_execution` | Siri command executions |
-| `biome.carplay` | CarPlay connection events |
-| `biome.low_power_mode` | Low power mode state changes |
-| `biome.dk_low_power` | DuetKnowledge low power events |
-| `biome.activity_level` | Device activity level |
-| `biome.harvested_mail` | Harvested mail metadata |
-| `biome.harvested_messages` | Harvested message metadata |
-| `biome.harvested_notes` | Harvested notes metadata |
-| `biome.harvested_notifications` | Harvested notification data |
-| `biome.third_party_apps` | Third-party app usage |
+| `biome.all` | Parse all Biome streams into timestamped records with extracted strings |
+| `biome.app_in_focus` | App.InFocus — which app had focus and when |
+| `biome.app_intents` | App.Intent — app intents (messages, media, calls, etc.) |
+| `biome.now_playing` | Media.NowPlaying — media playback events |
+| `biome.web_usage` | App.WebUsage — web browsing events tracked by the OS |
+| `biome.app_activity` | App.Activity — application activity events |
+| `biome.media_usage` | App.MediaUsage — media usage events |
+| `biome.wifi_connections` | _DKEvent.Wifi.Connection — WiFi connection/disconnection events |
+| `biome.bluetooth` | Bluetooth events |
+| `biome.wifi` | Device.Wireless.WiFi — WiFi state events |
+| `biome.display` | Device.Display.Backlight — display on/off state |
+| `biome.low_power_mode` | Device.Power.LowPowerMode — low power mode state changes |
+| `biome.location` | Location.Semantic — semantic location data |
+| `biome.notifications` | Notification.Usage — notification events |
+| `biome.safari_navigations` | Safari.Navigations — Safari URL navigations |
+| `biome.safari_page_load` | Safari.PageLoad — Safari page load events |
+| `biome.safari_history` | _DKEvent.Safari.History — Safari history events (DuetKnowledge) |
+| `biome.screentime` | ScreenTime.AppUsage — Screen Time app usage data |
+| `biome.user_focus` | UserFocus.InferredMode — inferred Focus/Do Not Disturb mode |
+| `biome.user_focus_computed` | UserFocus.ComputedMode — computed Focus mode |
+| `biome.activity_level` | _DKEvent.Activity.Level — device activity level |
+| `biome.dk_low_power` | _DKEvent.Device.LowPowerMode — DuetKnowledge low-power events |
+| `biome.third_party_apps` | ProactiveHarvesting.ThirdPartyApp — third-party app usage |
+| `biome.safari_pageview` | ProactiveHarvesting.Safari.PageView — Safari page views |
+| `biome.harvested_messages` | ProactiveHarvesting.Messages — harvested message metadata |
+| `biome.harvested_notes` | ProactiveHarvesting.Notes — harvested notes metadata |
+| `biome.harvested_notifications` | ProactiveHarvesting.Notifications — harvested notification data |
+| `biome.harvested_mail` | ProactiveHarvesting.Mail — harvested mail metadata |
+| `biome.intelligence_donations` | IntelligenceEngine.Interaction.Donation — Siri intelligence donations |
+| `biome.siri_execution` | Siri.Execution — Siri command executions |
+| `biome.messages_read` | Messages.Read — message read events |
+| `biome.carplay` | CarPlay.Connected — CarPlay connection events |
+| `biome.screen_sharing` | Screen.Sharing — screen sharing sessions |
+| `biome.apple_intelligence_tasks` | Lighthouse.Ledger.* — Apple Intelligence task ledger (Tahoe+) |
+| `biome.system_settings_search` | SystemSettings.SearchTerms — settings search history (Tahoe+) |
+| `biome.ai_model_catalog` | AI model asset delivery and catalog subscription streams |
+| `biome.generative_functions` | GenerativeModels.GenerativeFunctions.Instrumentation |
+| `biome.siri_remembers` | Siri.Remembers.* — Siri's persistent memory |
+| `biome.siri_self_events` | Siri.SELFProcessedEvent — Siri Self-Experience events |
+| `biome.siri_metrics` | Siri.Metrics.* / Siri.ODDI.* — Siri performance metrics |
+| `biome.llm_cache` | LLMCache.CacheManagerTelemetry — LLM cache telemetry (Tahoe+) |
+| `biome.media_analysis` | MediaAnalysis.* — Photos/Camera on-device analysis |
+| `biome.safari_extra` | Tahoe-era Safari signals not covered by other Safari streams |
+| `biome.messages_shared` | Messages.SharedWithYou.Feedback — Shared with You interactions |
+| `biome.intelligence_views_updated` | IntelligencePlatform.Views.Updated emissions |
+| `biome.entities` | IntelligencePlatform.Entity databases |
+| `biome.entity_changes` | *Changes audit tables in IntelligencePlatform |
+| `biome.recent_apps` | Games.RecentlyPlayed database |
+| `biome.cloud_sync` | Biome sync.db SyncSessionLog table |
 
 ### Communication
 
 | Function | Description |
 |----------|-------------|
-| `imessage.messages` | Parse iMessage/SMS messages with sender handle; text decoded from `attributedBody` when the plain-text column is NULL |
-| `imessage.chats` | Parse iMessage/SMS chat entries |
-| `imessage.attachments` | Parse iMessage/SMS attachments — `ts_created` falls back to the linked message's date when the attachment's own date is 0 |
-| `callhistory.calls` | Parse call records from CallHistory.storedata |
-| `interactions.entries` | Parse communication interactions from interactionC.db |
-| `interactions.contacts` | Parse contact entries from interactionC.db (unused-side timestamps emitted as NULL, not 2001 epoch) |
-| `addressbook.contacts` | Parse contacts from AddressBook ZABCDRECORD table |
-| `addressbook.emails` | Parse email addresses joined with contact names |
-| `addressbook.phones` | Parse phone numbers joined with contact names |
-| `notifications.entries` | Parse notification entries from usernoted db (`_system_center_:` prefix stripped from bundle ids) |
-| `facetime.links` | Parse FaceTime conversation links (link_name falls back to `link-{pseudonym}` when ZNAME is null) |
-| `facetime.handles` | Parse FaceTime registered handles (phone numbers, Apple IDs) |
+| `imessage.messages` | iMessage/SMS messages with sender handle information |
+| `imessage.chats` | iMessage/SMS chat entries |
+| `imessage.attachments` | iMessage/SMS attachments |
+| `facetime.links` | FaceTime conversation links |
+| `facetime.handles` | FaceTime handles (phone numbers/identifiers) |
+| `callhistory.calls` | Call records from CallHistory.storedata |
+| `interactions.entries` | Communication interactions from interactionC.db |
+| `interactions.contacts` | Contact entries from interactionC.db |
+| `addressbook.contacts` | Contacts from AddressBook ZABCDRECORD table |
+| `addressbook.emails` | Email addresses joined with contact names |
+| `addressbook.phones` | Phone numbers joined with contact names |
+| `mail.messages` | One record per indexed message with sender/subject/recipients |
+| `mail.attachments` | One record per indexed attachment (name + MIME + size) |
+| `ids.handles` | One record per IDS short-handle (per-service Apple-ID identity) |
 
 ### Browsers
 
 | Function | Description |
 |----------|-------------|
-| `safari.history` | Parse Safari browsing history from History.db |
-| `safari.bookmarks` | Parse Safari bookmarks from Bookmarks.plist |
-| `safari.downloads` | Parse Safari download history from Downloads.plist |
-| `firefox.history` | Parse browsing history from Firefox places.sqlite |
-| `firefox.cookies` | Parse cookies from Firefox cookies.sqlite (session cookies emit NULL `ts_expiry`, not 1970) |
-| `firefox.downloads` | Parse download history from Firefox places.sqlite |
-| `firefox.bookmarks` | Parse bookmarks from Firefox places.sqlite |
-| `firefox.logins` | Parse saved login entries (no passwords extracted) |
-| `firefox.formhistory` | Parse form autofill history |
-| `firefox.searches` | Parse search terms |
-| `chromium.history` | Parse browsing history from Chromium-based browsers |
-| `chromium.cookies` | Parse cookies from Chromium-based browsers |
-| `chromium.downloads` | Parse download history from Chromium-based browsers |
-| `chromium.bookmarks` | Parse bookmarks from Chromium-based browsers |
-| `chromium.logins` | Parse saved login entries (never-used credentials emit NULL `ts_last_used`, not 1601) |
-| `chromium.searches` | Parse keyword search terms |
-| `cookies.entries` | Parse top-level HTTP cookie store |
+| `safari.history` | Safari browsing history from History.db |
+| `safari.bookmarks` | Safari bookmarks from Bookmarks.plist |
+| `safari.downloads` | Safari download history from Downloads.plist |
+| `safari.topsites` | Safari frequently visited sites from TopSites.plist |
+| `firefox.history` | Browsing history from Firefox places.sqlite |
+| `firefox.cookies` | Cookies from Firefox cookies.sqlite |
+| `firefox.downloads` | Download history from Firefox places.sqlite |
+| `firefox.bookmarks` | Bookmarks from Firefox places.sqlite |
+| `firefox.logins` | Saved login entries from Firefox logins.json (no passwords) |
+| `firefox.formhistory` | Form autofill history from Firefox formhistory.sqlite |
+| `firefox.permissions` | Site permissions from Firefox permissions.sqlite |
+| `firefox.searches` | Search terms from Firefox places.sqlite |
+| `chromium.history` | Browsing history from Chromium-based browsers |
+| `chromium.cookies` | Cookies from Chromium-based browsers |
+| `chromium.downloads` | Download history from Chromium-based browsers |
+| `chromium.bookmarks` | Bookmarks from Chromium-based browsers |
+| `chromium.logins` | Saved login entries from Chromium-based browsers (no passwords) |
+| `chromium.searches` | Keyword search terms from Chromium-based browsers |
+| `chromium.topsites` | Top sites from Chromium-based browsers |
+| `cookies.entries` | Parse cookies from .binarycookies files |
+| `cookies.hsts` | Parse HSTS (HTTP Strict Transport Security) entries |
 
 ### System Info
 
 | Function | Description |
 |----------|-------------|
-| `osinfo.version` | Parse SystemVersion.plist for macOS version, build number |
-| `osinfo.install_date` | Get install date from .AppleSetupDone timestamp |
-| `localusers.entries` | Parse local user account plists from dslocal (uid, gid, shell, home, realname) |
-| `localtime.info` | Report the configured timezone from localtime symlink |
-| `hostfile.entries` | Parse /etc/hosts entries |
-| `dhcp.leases` | Parse DHCP lease files |
+| `osinfo.version` | Parse SystemVersion.plist for OS version information |
+| `osinfo.install_date` | Install date from .AppleSetupDone file modification time |
+| `users.entries` | Local user account plists from dslocal |
+| `accounts.entries` | Configured Internet Accounts |
+| `accounts.types` | Registered account types |
+| `accounts.properties` | Account properties (key-value pairs per account) |
+| `accounts.credentials` | Credential items (service names, expiration — no secrets) |
+| `localtime.info` | Configured timezone from localtime symlink |
+| `hosts.entries` | /etc/hosts entries |
+| `dhcp.leases` | DHCP lease files from /private/var/db/dhcpclient/leases/ |
+| `softwareupdate.appstore_installs` | App Store install history from storeSystem.db |
+| `softwareupdate.appstore_updates` | App Store update history from storeSystem.db |
+| `softwareupdate.receipts` | Software installation receipts from /var/db/receipts/ |
+| `softwareupdate.config` | macOS Software Update configuration |
 
 ### Persistence & Autostart
 
 | Function | Description |
 |----------|-------------|
-| `autostart.launch_items` | Parse all Launch Agents and Daemons combined |
-| `autostart.launch_agents` | Parse Launch Agents (user, system, Apple) |
-| `autostart.launch_daemons` | Parse Launch Daemons (system and Apple) |
-| `autostart.kernel_extensions` | Parse installed kexts |
-| `autostart.system_extensions` | Parse system extensions from db.plist |
-| `autostart.cronjobs` | Parse cron jobs |
-| `autostart.periodic` | Parse periodic scripts (daily/weekly/monthly) |
-| `autostart.startup_items` | Parse legacy StartupItems |
-| `autostart.startup_files` | Parse launchd.conf and rc.common |
-| `kext.installed` | Parse installed kernel extensions from Info.plist files |
-| `kext.load_history` | Parse kext load history from KextPolicy database |
-| `kext.system_extensions` | Parse system extensions |
+| `autostart.launch_items` | All Launch Agents and Daemons combined |
+| `autostart.launch_agents` | Launch Agents (user, system, and Apple) |
+| `autostart.launch_daemons` | Launch Daemons (system and Apple) |
+| `autostart.kernel_extensions` | Installed Kernel Extensions (kexts) |
+| `autostart.system_extensions` | Installed System Extensions from db.plist |
+| `autostart.cronjobs` | Cron jobs from /var/at/tabs/ and /etc/crontab |
+| `autostart.periodic` | Periodic scripts (daily/weekly/monthly) |
+| `autostart.startup_items` | Legacy StartupItems |
+| `autostart.startup_files` | /private/etc/launchd.conf and /private/etc/rc.common |
+| `kext.installed` | Installed kernel extensions from Info.plist across all kext locations |
+| `kext.load_history` | Kext load history from the legacy KextPolicy database |
+| `kext.policy` | Kext approval policies from the legacy KextPolicy database |
+| `kext.system_extensions` | System extensions from /Library/SystemExtensions/db.plist |
+| `kext.classification` | Kext vendor classifications from KextClassification.plist |
 
 ### Security
 
 | Function | Description |
 |----------|-------------|
-| `firewall.pf_rules` | Parse PF packet filter rules from /etc/pf.conf |
-| `firewall.alf_config` | Parse Application Level Firewall global configuration |
-| `firewall.alf_apps` | Parse ALF per-application firewall rules |
-| `firewall.alf_exceptions` | Parse ALF firewall exceptions |
-| `firewall.alf_services` | Parse ALF firewall service rules |
-| `keychain.generic` | Parse generic password entries from keychains (no secrets) |
-| `keychain.internet` | Parse internet password entries from keychains (no secrets) |
-| `keychain.certificates` | Parse certificate entries from keychains (missing cdat/mdat emit NULL, not 1970) |
-| `sudoers.entries` | Parse sudoers configuration entries |
-| `sudolog.entries` | Parse sudo timestamp files — last sudo usage per user |
-| `tcc.access` | Parse TCC privacy permission grants per service/client |
-| `tcc.expired` | Parse expired TCC grants |
-| `tcc.location_clients` | Parse TCC location-service client history |
-| `execpolicy.entries` | Parse executed binary measurements from ExecPolicy database |
-| `profiles.installed` | Parse installed configuration profiles |
-| `profiles.payloads` | Parse individual payloads from configuration profiles |
-| `profiles.settings` | Parse configuration profile settings plists |
+| `firewall.pf_rules` | PF packet filter rules from /etc/pf.conf and anchors |
+| `firewall.alf_config` | ALF (Application Level Firewall) global configuration |
+| `firewall.alf_apps` | ALF per-application firewall rules |
+| `firewall.alf_exceptions` | ALF firewall exceptions and explicit authorizations |
+| `firewall.alf_services` | ALF firewall service rules (SSH, file sharing, screen sharing, etc.) |
+| `keychain.generic` | Generic password entries from keychains (no secrets extracted) |
+| `keychain.internet` | Internet password entries from keychains (no secrets extracted) |
+| `keychain.certificates` | Certificate entries from keychains |
+| `keychain.systemkey` | SystemKey (System.keychain master key, SIP-protected on live) |
+| `sudoers.entries` | Sudoers configuration entries |
+| `sudolastrun.entries` | Sudo timestamp files — last sudo usage per user |
+| `execpolicy.entries` | Executed binary measurements from the ExecPolicy database |
+| `profiles.installed` | Installed configuration profiles |
+| `profiles.payloads` | Individual payloads from installed configuration profiles |
+| `profiles.settings` | Configuration profile settings plists (key-value pairs) |
+| `auth.rules` | One record per authorization right defined in auth.db |
+| `tcc.access` | TCC access permissions (grants/denials) from TCC.db |
+| `tcc.expired` | Expired TCC permissions from TCC.db |
+| `tcc.location_clients` | Location services client authorizations from clients.plist |
+| `quarantine.events` | One record per quarantine event (downloads + AirDrop + browser) |
 
 ### Filesystem & Forensics
 
 | Function | Description |
 |----------|-------------|
-| `dsstore.entries` | Parse .DS_Store entries — files/folders that existed in each directory |
-| `dsstore.files` | List all .DS_Store files with entry counts |
-| `fsevents.events` | Parse FSEvents records — file system activity |
-| `docrevisions.files` | Parse tracked files from DocumentRevisions database |
-| `docrevisions.generations` | Parse document revision generations (file versions) |
-| `trash.files` | List files in user Trash and volume-level .Trashes |
-| `trash.icloud` | List files in iCloud Drive trash |
-| `quicklook.thumbnails` | Parse QuickLook thumbnail cache entries |
-| `savedstate.entries` | Report apps with saved application state (UUID-only containers emit NULL bundle_id; `ts_modified` taken from dir mtime) |
-| `terminalstate.files` | List files in Terminal saved state directory |
-| `spotlight.applist` | Parse Spotlight applist.dat for known applications |
-| `spotlightshortcuts.entries` | Parse Spotlight learned search shortcuts — user query → resolved app/URL with `ts_last_used` |
+| `dsstore.entries` | All .DS_Store entries — files/folders that existed in each directory |
+| `dsstore.files` | All .DS_Store files with entry counts and referenced filenames |
+| `fsevents.events` | All FSEvents records showing file system activity |
+| `docrevisions.files` | Tracked files from the DocumentRevisions database |
+| `docrevisions.generations` | Document revision generations (file versions) |
+| `trash.files` | Files in the user Trash and volume-level .Trashes |
+| `trash.icloud` | Files in the iCloud Drive trash |
+| `quicklook.thumbnails` | QuickLook thumbnail cache entries |
+| `savedstate.entries` | Apps with saved application state (windows.plist) |
+| `terminalstate.files` | Files in Terminal saved state directory |
+| `spotlight.applist` | Spotlight applist.dat known applications |
+| `spotlightshortcuts.entries` | One record per learned Spotlight shortcut |
+| `timemachine.destinations` | One record per configured backup destination |
+| `timemachine.config` | Top-level TimeMachine config keys (auto-backup, interval, etc.) |
 
 ### Applications & Productivity
 
 | Function | Description |
 |----------|-------------|
-| `applications.installed` | Parse installed applications from Info.plist files |
-| `installhistory.entries` | Parse software installation history from InstallHistory.plist |
-| `softwareupdate.appstore_installs` | Parse App Store install events |
-| `softwareupdate.appstore_updates` | Parse App Store update events |
-| `softwareupdate.receipts` | Parse macOS package receipts (BOM .plist files) |
-| `officemru.entries` | Parse Microsoft Office recently opened documents (JSON + securebookmarks.plist) |
-| `notes.entries` | Parse Apple Notes — title, snippet, body text, folder, timestamps |
-| `notes.attachments` | Parse note attachments |
-| `wallet.passes` | Parse Apple Wallet passes (boarding passes, tickets, reservations) |
-| `wallet.transactions` | Parse Apple Pay payment transactions |
-| `wallet.payment_cards` | Parse registered Apple Pay payment cards |
-| `wallet.pass_details` | Parse detailed pass fields from .pkpass directories |
-| `crashreporter.events` | Parse CrashReporter plists for crash and force-quit timestamps |
-| `crashreporter.entries` | Parse per-app usage and crash statistics |
-| `printjobs.entries` | Parse CUPS print job cache entries |
-| `launchpad.apps` | Parse Launchpad apps with bundle ID, category, folder position |
-| `screentime.usage` | Parse Screen Time app usage records |
-| `screentime.blocks` | Parse Screen Time app blocks |
+| `applications.installed` | Installed applications from Info.plist files |
+| `installhistory.entries` | Software installation history from InstallHistory.plist |
+| `ams.content` | One record per AMS engagement cache entry (App Store / Music / Books / News) |
+| `officemru.entries` | Microsoft Office recently opened documents |
+| `notes.entries` | All notes with title, snippet, body text, folder, and timestamps |
+| `notes.accounts` | Note accounts (iCloud, local, etc.) |
+| `notes.attachments` | Note attachments (images, files, etc.) |
+| `notes.folders` | Note folders |
+| `calendar.events` | One record per CalendarItem (events, tasks, birthdays) |
+| `calendar.calendars` | One record per configured calendar (account / source identifier) |
+| `calendar.alarms` | One record per scheduled alarm with the linked event summary |
+| `reminders.entries` | One record per saved reminder |
+| `shortcuts.tools` | One record per shortcut / App Intent in the catalog |
+| `wallet.passes` | Wallet passes (boarding passes, tickets, reservations, etc.) |
+| `wallet.transactions` | Apple Pay payment transactions |
+| `wallet.payment_cards` | Registered Apple Pay payment cards |
+| `wallet.pass_types` | Registered pass type identifiers |
+| `wallet.pass_details` | Detailed pass fields from .pkpass directories |
+| `crashreporter.events` | CrashReporter plists — crash and force-quit timestamps |
+| `crashreporter.entries` | CrashReporter Intervals plist — per-app usage and crash statistics |
+| `printjobs.entries` | CUPS print job cache entries |
+| `launchpad.apps` | Launchpad apps with bundle ID, category, folder, and grid position |
+| `launchpad.groups` | Launchpad folders/groups |
+| `dockprefs.items` | One record per Dock tile (persistent + recent apps and docs) |
+| `photos.assets` | One record per photo / video / screenshot with EXIF + GPS |
+| `photos.albums` | One record per user album / smart album / cloud-shared album |
+| `photos.persons` | One record per recognised person across the library |
+| `linkd.links` | One record per rich-preview-generated URL (timestamp + source bundles) |
+| `statuskit.channels` | One record per published Focus channel |
+| `statuskit.statuses` | One record per published local status |
 
 ### Network & Remote Access
 
 | Function | Description |
 |----------|-------------|
-| `ssh.known_hosts` | Parse SSH known_hosts for previously connected hosts |
-| `ssh.config` | Parse SSH config files and extract Host blocks |
-| `ard.access` | Parse Apple Remote Desktop access entries |
-| `ard.config` | Parse ARD configuration from plist files |
-| `msrdc.connections` | Parse Microsoft Remote Desktop connection bookmarks |
-| `screensharing.connections` | Parse VNC/Screen Sharing connection history |
-| `wifiintelligence.wifi_events` | Parse WiFi association/disassociation events |
-| `wifiintelligence.person_interactions` | Parse nearby-person interaction events |
-| `wifiintelligence.entity_aliases` | Parse alias mappings used by Wi-Fi Intelligence |
-| `netusage.processes` | Parse per-process network usage statistics |
+| `ssh.known_hosts` | SSH known_hosts files — previously connected hosts |
+| `ssh.config` | SSH config files and Host blocks with their settings |
+| `ard.access` | Apple Remote Desktop access entries from cliauth and rmdb |
+| `ard.config` | Apple Remote Desktop configuration from plist files |
+| `msrdc.connections` | Microsoft Remote Desktop connection bookmarks |
+| `screensharing.connections` | Screen Sharing connection history |
+| `vpnconfig.configs` | One record per configured VPN / NetworkExtension instance |
+| `notifications.entries` | Notification entries from usernoted db |
+| `notifications.apps` | Registered notification apps from usernoted db |
+| `powerlogs.network` | Cumulative network usage per interface from the powerlog database |
 
 ### Logs
 
 | Function | Description |
 |----------|-------------|
-| `logs.list` | List all discovered log files with sizes |
+| `logs.list` | List all discovered log files with their sizes |
 | `logs.all_raw` | Parse all log files as raw lines |
-| `logs.system` | Parse system.log entries in syslog format |
-| `logs.user` | Parse user application logs from ~/Library/Logs/ |
-| `logs.install` | Parse install.log entries |
-| `logs.asl` | Parse all ASL binary database files (corrupt records with level > 7 or out-of-range ts are dropped) |
-| `logs.asl_system` | Parse system-wide ASL logs from /var/log/asl/ |
-| `logs.asl_diagnostics` | Parse ASL files from DiagnosticMessages |
-| `logs.asl_powermanagement` | Parse ASL power management logs (sleep/wake) |
-| `logs.audit_classes` | Parse audit class definitions |
-| `logs.audit_events` | Parse audit event definitions |
-| `powerlogs.app_usage` | Parse frontmost-app history from `PLApplicationAgent_EventForward_FrontmostApp` (bundle_id, app_type, asn) |
-| `powerlogs.network` | Parse cumulative network usage per interface (bytes_in/out, interface) |
-| `powerlogs.sleep_wake` | Parse sleep/wake power state events (event, state, wake_type, driver_wake_reason, uuid) |
+| `logs.system` | system.log entries in syslog format |
+| `logs.user` | User application log files from ~/Library/Logs/ |
+| `logs.install` | install.log entries (software installation history) |
+| `logs.asl` | All ASL (Apple System Log) binary database files |
+| `logs.asl_system` | ASL files from /var/log/asl/ (system-wide ASL logs) |
+| `logs.asl_diagnostics` | ASL files from /private/var/log/DiagnosticMessages/ |
+| `logs.asl_powermanagement` | ASL files from /var/log/powermanagement/ (sleep/wake events) |
+| `logs.audit_classes` | Audit class definitions from /etc/security/audit_class |
+| `logs.audit_events` | Audit event definitions from /etc/security/audit_event |
+| `powerlogs.app_usage` | Frontmost-application history from the powerlog database |
+| `powerlogs.sleep_wake` | Sleep/wake power state events from the powerlog database |
 
 ### Cloud & Sync
 
 | Function | Description |
 |----------|-------------|
-| `icloudfiles.files` | List files in iCloud Drive local storage |
-| `sharedfilelist.favorites` | Parse Finder sidebar favorite items |
-| `sharedfilelist.volumes` | Parse favorite volumes (mounted drives, network shares) |
-| `sharedfilelist.recent_apps` | Parse recently launched applications |
-| `sharedfilelist.recent_docs` | Parse recently opened documents |
-| `sharedfilelist.projects` | Parse Finder project/tag items |
-| `sharepoints.entries` | Parse sharepoint definitions from dslocal |
-| `accounts.entries` | Parse registered accounts from Accounts DB |
-| `accounts.properties` | Parse per-account key-value properties (bplist values decoded to readable strings) |
-| `accounts.credentials` | Parse credential metadata from Accounts DB |
+| `icloud.files` | Files in iCloud Drive local storage |
+| `icloudacct.accounts` | One record per iCloud account configured (Apple ID + enabled services) |
+| `sharedfilelist.favorites` | Finder sidebar favorite items |
+| `sharedfilelist.volumes` | Favorite volumes (mounted drives, network shares) |
+| `sharedfilelist.recent_apps` | Recently launched applications |
+| `sharedfilelist.recent_docs` | Recently opened documents |
+| `sharedfilelist.projects` | Finder project/tag items |
+| `sharedfilelist.all` | All SharedFileList .sfl3 files |
+| `sharepoints.entries` | Sharepoint definitions from dslocal plist files |
+| `idevicebackup.info` | iOS backup device information from Info.plist |
+| `idevicebackup.files` | Backed-up file list from Manifest.db |
 
 ### Device & Config
 
 | Function | Description |
 |----------|-------------|
-| `preferences.entries` | Parse all preference plists into flattened key-value records |
-| `preferences.list` | List all preference plist files with top-level keys |
-| `etcfiles.entries` | Read common /etc configuration files as raw lines |
-| `utmpx.entries` | Parse binary utmpx login records (file SIGNATURE header row skipped) |
-| `lockdown.entries` | Parse iOS device pairing plists from /private/var/db/lockdown/ |
-| `idevicebackup.info` | Parse iOS backup metadata (Finder/iTunes) |
-| `idevicebackup.files` | Parse iOS backup file manifest |
+| `preferences.entries` | All preference plists flattened to key-value records |
+| `preferences.list` | All preference plist files with their top-level keys |
+| `etcfiles.entries` | Common /etc configuration files as raw lines |
+| `utmpx.entries` | Binary utmpx login records |
+| `lockdown.paired` | One record per paired iOS device — UDID, model, serial, MACs, ECID |
+| `sysconfig.wifi_known` | One record per known WiFi network (SSID + BSSID + last-joined) |
+| `sysconfig.network_interfaces` | One record per network interface — MAC + type + IOKit path |
+| `sysconfig.network_locations` | One record per saved network location (Home/Work/etc) + current pointer |
+| `sysconfig.firewall` | One record per top-level Application Firewall setting in alf.plist |
+| `ble.devices_seen` | One record per BLE peripheral the Mac has observed (paired or not) |
+| `bluetoothpaired.devices` | One record per paired Bluetooth device (timestamps + vendor/product IDs) |
+| `homekit.accessories` | One record per paired HomeKit accessory (lights, locks, sensors) |
+| `homekit.homes` | One record per HomeKit home (residence the user configured) |
+| `homekit.triggers` | One record per automation trigger (time-of-day, location, event) |
+| `locationd.clients` | One record per app that has requested Core Location access |
+| `wifiintelligence.wifi_events` | WiFi connect/disconnect events from views.db |
+| `wifiintelligence.person_interactions` | Person interaction mechanisms from views.db |
+| `wifiintelligence.entity_aliases` | Entity aliases from views.db |
+| `trial.experiments` | One record per Trial namespace (experiment) the device is enrolled in |
 
 ---
+
+## Repository Layout
+
+```
+Plugins/   # 83 plugin modules — point --plugin-path here
+README.md  # This file
+```
+
+For the companion Velociraptor collectors and analyst tooling, see [MacOS-Velociraptor-Collectors](https://github.com/MrJayTechie/MacOS-Velociraptor-Collectors) and [Dissectify](https://github.com/MrJayTechie/Dissectify).
